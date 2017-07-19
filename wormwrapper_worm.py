@@ -1,40 +1,54 @@
 import threading
+import sys
+import traceback
 import os
 import time
 import random
 import pymongo
 import ctypes
+import importlib.util
+import string
 from time import ctime, sleep
 from bson.objectid import ObjectId
 dburi = "mongodb://127.0.0.1"
 client = pymongo.MongoClient(dburi)
 taskdb = client["tasks"]
-freetask = taskdb["free"]
-busytask = taskdb["busy"]
+tasklist = taskdb["tasks"]
+
 placeholder = taskdb["result"]
-placeholder.ensure_index('name', unique=True)
+placeholder.ensure_index('name', unique=False)
 statusholder = taskdb["status"]
 statusholder.ensure_index('name', unique=True)
 instructionholder = taskdb["instruction"]
 nowinstruction = ""
-instructiontimestamp = 0.0
+instructiontimestamp = time.time()
 nowtaskname = ""
+exc_traceback = ""
+thread_error = False
 
-
-def dowork(info, resultlist):
-    while True:
-        emitresult("dowork "+str(info["num"]), resultlist)
-        sleep(random.randint(1,10))
+def dowork(info, resultlist, modulename):
+    global exc_traceback, thread_error
+    module = importlib.import_module(modulename)
+    try:
+        module.run(info, resultlist)
+        while True:
+            print(module.wormwrapper_str1)
+            emitresult("dowork "+str(info["num"]), resultlist)
+            sleep(random.randint(1,10))
+    except Exception as e:
+        thread_error = True
+        exc_traceback = ''.join(traceback.format_exception(*sys.exc_info()))
 
 
 def update(name, resultlist):
     while True:
-        placeholder.update_one({"name": name}, {"$set": {"result": resultlist}})
+        placeholder.insert_one({"name": name, "timestamp": time.time(), "result": resultlist})
+        resultlist.clear()
         sleep(10+random.randint(1,5))
 
 
 def emitresult(text, resultlist):
-    resultlist.append({"timestamp":time.time(), "data":text})
+    resultlist.append({"timestamp":time.time(), "data":str(text)})
     print(time.time(), text)
 
 
@@ -56,12 +70,13 @@ def wormwrapper_get_instruction():
     nowinstruction = ""
     instructiondata = instructionholder.find_one({"name": "instruction"})
     if instructiondata is None:
-        statusholder.insert_one({"name": "instruction", "list": [{"timestamp":0.0, "data":"None"}]})
+        instructionholder.insert_one({"name": "instruction", "list": [{"timestamp":0.0, "data":"None"}]})
         instructiondata = instructionholder.find_one({"name": "instruction"})
     for instruction in instructiondata["list"]:
         if instruction["data"] != "None":
             if instruction["timestamp"] > instructiontimestamp:
                 nowinstruction = instruction["data"]
+                print("modify: ",nowinstruction)
                 instructiontimestamp = instruction["timestamp"]
                 break
     if nowinstruction == "" or nowinstruction is None:
@@ -74,10 +89,9 @@ resultlist = []
 
 
 def wormwrapper_delete_task(name):
-    placeholder.find_one_and_delete({"name": str(name)})
+    placeholder.delete_many({"name": str(name)})
     statusholder.find_one_and_delete({"name": str(name)})
-    freetask.find_one_and_delete({"name": str(name)})
-    busytask.find_one_and_delete({"name": str(name)})
+    tasklist.find_one_and_delete({"name": str(name)})
 
 
 def wormwrapper_dostuck():
@@ -88,21 +102,43 @@ def wormwrapper_dostuck():
             instructionholder.insert_one({"name": "status", "status": "free", "timestamp": 0})
             insstatus = instructionholder.find_one({"name": "status"})
         if insstatus["status"] == "running":
-            oneinfo = freetask.find_one_and_delete({})
+            oneinfo = tasklist.find_one_and_delete({"status": "free"})
             if oneinfo is not None:
-                busytask.insert_one(oneinfo)
-                return oneinfo["name"], oneinfo["info"]
+                oneinfo["status"] = "running"
+                tasklist.insert_one(oneinfo)
+                return oneinfo["name"], oneinfo["info"], oneinfo
         sleep(8 + random.randint(1, 10))
 
 
-def wormwrapper_dogetinstruction():
+def wormwrapper_dogetinstruction(nowtaskname, oneinfo):
+    global resultlist, thread_error, exc_traceback
     while True:
-        instruction = wormwrapper_get_instruction()
-        print(instruction)
-        if instruction == "forcestop":
+        if thread_error:
+            global resultlist
+            print("thread has some error")
             for t in threads:
                 wormwrapper_terminate_thread(t)
-            update(nowtaskname, resultlist)
+            resultlist.append({"timestamp":time.time(), "data":exc_traceback})
+            placeholder.insert_one({"name": nowtaskname, "timestamp": time.time(), "result": resultlist})
+            resultlist.clear()
+            oneinfo["status"] = "error"
+            statusholder.update_one({"name": nowtaskname}, {"$set": {"status": "error"}})
+            tasklist.update_one({"name": oneinfo["name"]}, {"$set": {"status": "error"}})
+            thread_error = False
+            exc_traceback = ""
+            break
+        instruction = wormwrapper_get_instruction()
+        print("Try to get an instruction")
+        print(instruction)
+        if instruction == "forcestop":
+            print('stoptask')
+            for t in threads:
+                wormwrapper_terminate_thread(t)
+            placeholder.insert_one({"name": nowtaskname, "timestamp": time.time(), "result": resultlist})
+            resultlist.clear()
+            oneinfo["status"] = "stop"
+            statusholder.update_one({"name": nowtaskname}, {"$set": {"status": "stop"}})
+            tasklist.update_one({"name": oneinfo["name"]}, {"$set": {"status": "stop"}})
             break
         if instruction.split(' ')[0] == "deletetask":
             deletetaskname = instruction.split(' ')[1]
@@ -111,23 +147,40 @@ def wormwrapper_dogetinstruction():
                     wormwrapper_terminate_thread(t)
                 wormwrapper_delete_task(deletetaskname)
                 break
+        if instruction.split(' ')[0] == "stoptask":
+            stoptaskname = instruction.split(' ')[1]
+            if stoptaskname == nowtaskname:
+                print('stoptask')
+                for t in threads:
+                    wormwrapper_terminate_thread(t)
+                placeholder.insert_one({"name": nowtaskname, "timestamp": time.time(), "result": resultlist})
+                resultlist.clear()
+                oneinfo["status"] = "stop"
+                statusholder.update_one({"name": nowtaskname}, {"$set": {"status" : "stop"}})
+                tasklist.update_one({"name": oneinfo["name"]}, {"$set": {"status" : "stop"}})
+                break
         sleep(20 + random.randint(1, 10))
 
 
 if __name__ == '__main__':
     while True:
-        name, info = wormwrapper_dostuck()
+        name, info, oneinfo = wormwrapper_dostuck()
         nowtaskname = name
         threads.clear()
         resultlist.clear()
-        place = placeholder.find_one({"name": nowtaskname})
         statusholder.update_one({"name": nowtaskname}, {"$set": {"status": "running"}})
-        resultlist = place["result"]
-        t1 = threading.Thread(target=dowork, args=(info, resultlist,))
+        modulefilename = ''.join(random.sample(string.ascii_letters + string.digits, 8))
+        while os.path.exists(modulefilename+".py"):
+            modulefilename = ''.join(random.sample(string.ascii_letters + string.digits, 8))
+        file1 = open(modulefilename+".py", 'w')
+        file1.write(oneinfo["code"])
+        file1.close()
+        resultlist = []
+        t1 = threading.Thread(target=dowork, args=(info, resultlist, modulefilename))
         t2 = threading.Thread(target=update, args=(name, resultlist,))
         threads.append(t1)
         threads.append(t2)
         for t in threads:
             t.setDaemon(True)
             t.start()
-        wormwrapper_dogetinstruction()
+        wormwrapper_dogetinstruction(nowtaskname, oneinfo)

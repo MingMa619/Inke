@@ -1,4 +1,4 @@
-### WormWrapper 使用指南
+### WormWrapper V2.0 使用指南
 
 By ttbachyinsda
 
@@ -27,7 +27,7 @@ WormWrapper 是一个简易的并行计算模块，通过在一台或多台计�
 
 ##### 添加Task
 
-可以使用多种方法添加task，由于需求原因暂时只提供虚拟task添加的接口。
+首先写好代码，保存为一个.py文件，然后通过wormwrapper_admin的wormwrapper_user_add_task接口传入task的名字，信息和代码的位置，worm会根据info执行给定代码的内容。
 
 ##### 开始运行
 
@@ -37,15 +37,27 @@ WormWrapper 是一个简易的并行计算模块，通过在一台或多台计�
 
 在admin程序中输入showinfo (taskname)，即可跟踪运行的结果。
 
+##### 其他操作
+
+可以停止一个task(stoptask)，恢复一个task并使其准备执行(resumetask)，清除一个task的输出信息(cleartask)，删除一个task(deletetask)。
+
 #### 二、移植
 
-worm需要告诉它做什么才能工作，而它只需要你修改dowork函数来告诉它。dowork函数有两个参数，第二个参数是输出结果的列表，格式如下：
+worm需要告诉它做什么才能工作，而它现在不需要你修改dowork函数来告诉它，因为你可以直接把代码告诉worm。代码格式如下：
 
-[{"timestamp": (timestamp), "data": (data)}, ...]
+```python
+import wormwrapper_interface as wi
+from time import sleep
+import random
+def run(info, resultlist):
+    while True:
+        wi.emitresult("dowork " + str(info["num"]), resultlist)
+        sleep(random.randint(1, 10))
+```
 
-第一个参数是输入的信息，格式为一个dict，worm应该根据输入的信息进行正确的操作。
+只需要完成run过程的编写，根据info传进来的数据，通过wi.emitresult进行输出即可。resultlist这个变量可以忽略。
 
-添加结果可以使用emitresult函数。
+然后添加task的时候，只需要给出代码的路径，worm就能自动执行你需要执行的那一份代码。
 
 #### 三、注意事项
 
